@@ -4,9 +4,9 @@
   "description": "Project Management course project server side.",
   "main": "server.js",
   "scripts": {
-    "test": "jest",
-    "start": "node server",
-    "dev": "nodemon server"
+    "test": "jest tests/*.test.js",
+    "start": "node src/server.js",
+    "dev": "nodemon src/server.js"
   },
   "keywords": [],
   "author": "",
