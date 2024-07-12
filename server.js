@@ -13,7 +13,7 @@ const users = [{ username: "user1", password: "Password!" }];
 // Route to handle login
 app.post("/login", express.json(), (req, res) => {
   const { username, password } = req.body;
-  console.log(username);
+  console.log("Someone tried to login with the username:" + username);
   // Simulated login logic (replace with actual user authentication, i.e a request to the database and unhashing password etc..)
   const user = users.find(
     (user) => user.username === username && user.password === password
