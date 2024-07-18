@@ -1,4 +1,4 @@
-name: Production Test & Deploy.
+name: Production Test & Deploy
 
 on:
   push:
