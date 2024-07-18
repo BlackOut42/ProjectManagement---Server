@@ -1,7 +1,7 @@
 # ProjectManagement-Server
 Project Management course project server side.
 
-##To Run The project
+## To Run The project
 1. Clone the repository
 2. Run npm install to install all dependencies.
 3. Use available scripts.
