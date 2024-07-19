@@ -3,7 +3,11 @@ const path = require("path");
 const cors = require("cors");
 const passwordValidationHandler = require("./util/passwordValidationHandler");
 const { app: firebaseApp } = require("./config/firebaseConfig");
-const { getAuth, createUserWithEmailAndPassword } = require("firebase/auth");
+const {
+  getAuth,
+  createUserWithEmailAndPassword,
+  signInWithEmailAndPassword,
+} = require("firebase/auth");
 const app = express();
 const PORT = process.env.PORT || 5000;
 
@@ -20,23 +24,22 @@ app.post("/login", express.json(), (req, res) => {
   console.log("Someone tried to login with the email:" + email);
   const passwordValid = passwordValidationHandler.passwordValidation(password);
   if (!passwordValid) {
-    res.status(400).json({
+    return res.status(400).json({
       error:
         "Error: The string must be at least 8 characters long, contain at least one uppercase letter, and include at least one symbol",
     });
   }
-  // Simulated login logic (replace with actual user authentication, i.e a request to the database and unhashing password etc..)
-  const user = users.find(
-    (user) => user.email === email && user.password === password
-  );
-
-  if (user) {
-    // Redirect or respond with success message
-    res.json({ message: "Login successful" });
-  } else {
-    // Respond with error message or status indicating account not found
-    res.status(404).json({ error: "Account not found" });
-  }
+  signInWithEmailAndPassword(auth, email, password)
+    .then((userCredential) => {
+      const user = userCredential.user;
+      console.log(user);
+      return res.json({ message: "Login successful" });
+    })
+    .catch(() => {
+      return res.status(404).json({
+        error: `Error: Incorrect username or password. Please try again.`,
+      });
+    });
 });
 // Route to handle registration
 app.post("/register", express.json(), (req, res) => {
