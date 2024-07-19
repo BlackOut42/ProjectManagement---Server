@@ -14,7 +14,8 @@
   "license": "ISC",
   "dependencies": {
     "cors": "^2.8.5",
-    "express": "^4.19.2"
+    "express": "^4.19.2",
+    "firebase": "^10.12.4"
   },
   "devDependencies": {
     "@eslint/js": "^9.7.0",
