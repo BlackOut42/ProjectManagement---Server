@@ -24,7 +24,7 @@ app.post("/login", express.json(), (req, res) => {
   console.log("Someone tried to login with the email:" + email);
   const passwordValid = passwordValidationHandler.passwordValidation(password);
   if (!passwordValid) {
-    res.status(400).json({
+    return res.status(400).json({
       error:
         "Error: The string must be at least 8 characters long, contain at least one uppercase letter, and include at least one symbol",
     });
@@ -33,10 +33,12 @@ app.post("/login", express.json(), (req, res) => {
     .then((userCredential) => {
       const user = userCredential.user;
       console.log(user);
-      res.json({ message: "Login successful" });
+      return res.json({ message: "Login successful" });
     })
-    .catch((err) => {
-      return res.status(404).json({ error: `Error:${err.message}` });
+    .catch(() => {
+      return res.status(404).json({
+        error: `Error: Incorrect username or password. Please try again.`,
+      });
     });
 });
 // Route to handle registration
