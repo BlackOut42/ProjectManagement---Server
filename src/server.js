@@ -1,5 +1,4 @@
 const express = require("express");
-const path = require("path");
 const cors = require("cors");
 const passwordValidationHandler = require("./util/passwordValidationHandler");
 const { app: firebaseApp, database: db } = require("./config/firebaseConfig");
@@ -12,24 +11,27 @@ const {
 const {
   collection,
   doc,
-  addDoc,
   setDoc,
   where,
   query,
   getDocs,
 } = require("firebase/firestore");
+const authenticate = require("./middlewares/firebaseAuthMiddleware"); // Import authentication middleware
+
 const usersCollection = collection(db, "users");
 const postsCollection = collection(db, "posts");
 
 const app = express();
 const PORT = process.env.PORT || 5000;
 
-app.use(express.json()); // Using JSON parsing middleware
+// Use JSON parsing middleware globally
+app.use(express.json());
 app.use(cors()); // Enable CORS for all routes(not safe but it is what it is)
+
 const auth = getAuth(); // firebase authentication instance
 
 // Route to handle login
-app.post("/login", express.json(), (req, res) => {
+app.post("/login", (req, res) => {
   const { email, password } = req.body;
   console.log("Someone tried to login with the email: " + email);
 
@@ -50,7 +52,6 @@ app.post("/login", express.json(), (req, res) => {
       return user.getIdToken().then((idToken) => {
         // Create a query to find the user by UID
         const userQuery = query(usersCollection, where("uid", "==", user.uid));
-
         // Execute the query
         return getDocs(userQuery).then((snapshot) => {
           if (!snapshot.empty) {
@@ -79,7 +80,7 @@ app.post("/login", express.json(), (req, res) => {
 });
 
 // Route to handle registration
-app.post("/register", express.json(), (req, res) => {
+app.post("/register", (req, res) => {
   const { email, password, firstName } = req.body;
   console.log("Someone tried to register with the email: " + email);
 
@@ -90,7 +91,7 @@ app.post("/register", express.json(), (req, res) => {
         "Error: The string must be at least 8 characters long, contain at least one uppercase letter, and include at least one symbol",
     });
   }
-  // Ensure firstName is present and not undefined
+
   if (!firstName) {
     return res.status(400).json({
       error: "Error: First name is required.",
@@ -103,13 +104,14 @@ app.post("/register", express.json(), (req, res) => {
     .then((response) => {
       createdUser = response.user; // Save the user object for later use
       console.log(`User created with UID: ${createdUser.uid}`);
-
       // Use setDoc to set the document ID to UID
       const userDoc = doc(db, "users", createdUser.uid);
       return setDoc(userDoc, {
         uid: createdUser.uid,
         email: email,
         firstName: firstName,
+        following: [],
+        followers: [],
       });
     })
     .then(() => {
@@ -122,6 +124,8 @@ app.post("/register", express.json(), (req, res) => {
             uid: createdUser.uid,
             email: email,
             firstName: firstName,
+            following: [],
+            followers: [],
           },
           idToken: idToken,
         });
@@ -149,6 +153,30 @@ app.post("/register", express.json(), (req, res) => {
     });
 });
 
+// Route to create a post
+app.post("/create-post", authenticate, async (req, res) => {
+  const { uid } = req.user; // Get UID from the token
+  const { title, body } = req.body;
+
+  if (!title || !body) {
+    return res.status(400).json({ error: "Title and body are required" });
+  }
+
+  try {
+    const postDoc = doc(postsCollection, `${uid}_${Date.now()}`); // Use UID and timestamp to create a unique document
+    await setDoc(postDoc, {
+      title: title,
+      body: body,
+      createdAt: new Date(),
+      uid: uid,
+    });
+    res.json({ message: "Post created successfully" });
+  } catch (error) {
+    console.error("Error creating post:", error);
+    res.status(500).json({ error: "Error creating post" });
+  }
+});
+
 app.get("/about", (req, res) => {
   res.json({
     Team: [
@@ -161,6 +189,7 @@ app.get("/about", (req, res) => {
     ],
   });
 });
+
 app.get("/ping", (req, res) => {
   res.json("Pong:Team 4");
 });
