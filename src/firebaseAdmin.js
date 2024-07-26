@@ -1,12 +1,8 @@
 const admin = require("firebase-admin");
-const path = require("path");
+const serviceAccount = require("/etc/secrets/firebaseAdminSDK.json"); //this is for render, for local development change to local path.
 
-// Path to the Firebase Admin SDK JSON file
-const serviceAccountPath = path.join(__dirname, "firebaseAdminSDK.json");
-
-// Initialize Firebase Admin with service account credentials
 admin.initializeApp({
-  credential: admin.credential.cert(require(serviceAccountPath)),
+  credential: admin.credential.cert(serviceAccount),
 });
 
 module.exports = admin;
