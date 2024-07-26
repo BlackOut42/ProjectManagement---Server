@@ -15,6 +15,10 @@ const {
   where,
   query,
   getDocs,
+  orderBy,
+  limit,
+  startAfter,
+  Timestamp,
 } = require("firebase/firestore");
 const authenticate = require("./middlewares/firebaseAuthMiddleware"); // Import authentication middleware
 
@@ -156,8 +160,9 @@ app.post("/register", (req, res) => {
 // Route to create a post
 app.post("/create-post", authenticate, async (req, res) => {
   const { uid } = req.user; // Get UID from the token
-  const { title, body } = req.body;
-
+  const { title, body, author } = req.body;
+  console.log(author);
+  const authorObj = JSON.parse(author);
   if (!title || !body) {
     return res.status(400).json({ error: "Title and body are required" });
   }
@@ -167,13 +172,51 @@ app.post("/create-post", authenticate, async (req, res) => {
     await setDoc(postDoc, {
       title: title,
       body: body,
-      createdAt: new Date(),
+      author: authorObj.firstName,
+      createdAt: Timestamp.fromDate(new Date()), // Use Firestore timestamp
       uid: uid,
+      comments: [],
     });
     res.json({ message: "Post created successfully" });
   } catch (error) {
     console.error("Error creating post:", error);
     res.status(500).json({ error: "Error creating post" });
+  }
+});
+
+// Route to get posts
+app.get("/posts", async (req, res) => {
+  const { lastVisible } = req.query;
+
+  let queryRef = query(postsCollection, orderBy("createdAt", "desc"), limit(5));
+
+  if (lastVisible) {
+    const lastVisibleDate = new Date(lastVisible);
+    const lastVisibleTimestamp = Timestamp.fromDate(lastVisibleDate);
+    queryRef = query(
+      postsCollection,
+      orderBy("createdAt", "desc"),
+      startAfter(lastVisibleTimestamp),
+      limit(5)
+    );
+  }
+
+  try {
+    const snapshot = await getDocs(queryRef);
+    const posts = snapshot.docs.map((doc) => ({
+      id: doc.id,
+      ...doc.data(),
+    }));
+    const lastPost = snapshot.docs[snapshot.docs.length - 1];
+    res.json({
+      posts: posts,
+      lastVisible: lastPost
+        ? lastPost.data().createdAt.toDate().toISOString()
+        : null,
+    });
+  } catch (error) {
+    console.error("Error fetching posts:", error);
+    res.status(500).json({ error: "Error fetching posts" });
   }
 });
 
