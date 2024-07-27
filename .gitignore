@@ -167,5 +167,6 @@ sketch
 # Ignore all local history of files
 .history
 .ionide
+firebaseAdminSDK.json
 
 # End of https://www.toptal.com/developers/gitignore/api/visualstudiocode,react,node

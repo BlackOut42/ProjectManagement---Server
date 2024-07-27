@@ -19,6 +19,8 @@ const {
   limit,
   startAfter,
   Timestamp,
+  updateDoc,
+  arrayUnion,
 } = require("firebase/firestore");
 const authenticate = require("./middlewares/firebaseAuthMiddleware"); // Import authentication middleware
 
@@ -219,7 +221,41 @@ app.get("/posts", async (req, res) => {
     res.status(500).json({ error: "Error fetching posts" });
   }
 });
+// Route to add a comment to a post
+app.post("/add-comment", authenticate, async (req, res) => {
+  const { postId, body } = req.body;
+  const { uid } = req.user;
 
+  if (!body) {
+    return res.status(400).json({ error: "Comment body is required" });
+  }
+
+  try {
+    const userQuery = query(usersCollection, where("uid", "==", uid));
+    const userSnapshot = await getDocs(userQuery);
+    if (userSnapshot.empty) {
+      return res.status(404).json({ error: "User not found" });
+    }
+
+    const userData = userSnapshot.docs[0].data();
+
+    const comment = {
+      body,
+      author: userData.firstName,
+      createdAt: Timestamp.fromDate(new Date()),
+    };
+
+    const postDocRef = doc(postsCollection, postId);
+    await updateDoc(postDocRef, {
+      comments: arrayUnion(comment),
+    });
+
+    res.json({ message: "Comment added successfully" });
+  } catch (error) {
+    console.error("Error adding comment:", error);
+    res.status(500).json({ error: "Error adding comment" });
+  }
+});
 app.get("/about", (req, res) => {
   res.json({
     Team: [
