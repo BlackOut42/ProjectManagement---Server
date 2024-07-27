@@ -12,6 +12,8 @@ const {
   collection,
   doc,
   setDoc,
+  getDoc,
+  deleteDoc,
   where,
   query,
   getDocs,
@@ -19,6 +21,8 @@ const {
   limit,
   startAfter,
   Timestamp,
+  updateDoc,
+  arrayUnion,
 } = require("firebase/firestore");
 const authenticate = require("./middlewares/firebaseAuthMiddleware"); // Import authentication middleware
 
@@ -220,6 +224,128 @@ app.get("/posts", async (req, res) => {
   }
 });
 
+// Route to edit a post
+app.put("/edit-post/:postId", authenticate, async (req, res) => {
+  const { postId } = req.params;
+  const { title, body } = req.body;
+  const { uid } = req.user;
+
+  if (!title || !body) {
+    return res.status(400).json({ error: "Title and body are required" });
+  }
+
+  try {
+    const postDocRef = doc(postsCollection, postId);
+    const postDoc = await getDoc(postDocRef);
+
+    if (!postDoc.exists) {
+      return res.status(404).json({ error: "Post not found" });
+    }
+
+    const post = postDoc.data();
+    const userDocRef = doc(usersCollection, uid);
+    const userDoc = await getDoc(userDocRef);
+
+    if (!userDoc.exists) {
+      return res.status(404).json({ error: "User not found" });
+    }
+
+    const user = userDoc.data();
+
+    if (post.uid !== uid && !user.isAdmin) {
+      return res.status(403).json({
+        error: "You can only edit your own posts or you need admin rights",
+      });
+    }
+
+    await updateDoc(postDocRef, {
+      title,
+      body,
+    });
+
+    const updatedPost = (await getDoc(postDocRef)).data();
+
+    res.json({
+      message: "Post updated successfully",
+      updatedPost: { ...updatedPost, id: postDocRef.id },
+    });
+  } catch (error) {
+    console.error("Error updating post:", error);
+    res.status(500).json({ error: "Error updating post" });
+  }
+});
+// Route to delete a post
+app.delete("/delete-post/:postId", authenticate, async (req, res) => {
+  const { postId } = req.params;
+  const { uid } = req.user;
+
+  try {
+    const postDocRef = doc(postsCollection, postId);
+    const postDoc = await getDoc(postDocRef);
+
+    if (!postDoc.exists) {
+      return res.status(404).json({ error: "Post not found" });
+    }
+
+    const post = postDoc.data();
+    const userDocRef = doc(usersCollection, uid);
+    const userDoc = await getDoc(userDocRef);
+
+    if (!userDoc.exists) {
+      return res.status(404).json({ error: "User not found" });
+    }
+
+    const user = userDoc.data();
+
+    if (post.uid !== uid && !user.isAdmin) {
+      return res.status(403).json({
+        error: "You can only delete your own posts or you need admin rights",
+      });
+    }
+
+    await deleteDoc(postDocRef);
+
+    res.json({ message: "Post deleted successfully" });
+  } catch (error) {
+    console.error("Error deleting post:", error);
+    res.status(500).json({ error: "Error deleting post" });
+  }
+});
+// Route to add a comment to a post
+app.post("/add-comment", authenticate, async (req, res) => {
+  const { postId, body } = req.body;
+  const { uid } = req.user;
+
+  if (!body) {
+    return res.status(400).json({ error: "Comment body is required" });
+  }
+
+  try {
+    const userQuery = query(usersCollection, where("uid", "==", uid));
+    const userSnapshot = await getDocs(userQuery);
+    if (userSnapshot.empty) {
+      return res.status(404).json({ error: "User not found" });
+    }
+
+    const userData = userSnapshot.docs[0].data();
+
+    const comment = {
+      body,
+      author: userData.firstName,
+      createdAt: Timestamp.fromDate(new Date()),
+    };
+
+    const postDocRef = doc(postsCollection, postId);
+    await updateDoc(postDocRef, {
+      comments: arrayUnion(comment),
+    });
+
+    res.json({ message: "Comment added successfully" });
+  } catch (error) {
+    console.error("Error adding comment:", error);
+    res.status(500).json({ error: "Error adding comment" });
+  }
+});
 app.get("/about", (req, res) => {
   res.json({
     Team: [
