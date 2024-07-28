@@ -23,6 +23,8 @@ const {
   Timestamp,
   updateDoc,
   arrayUnion,
+  arrayRemove,
+  increment,
 } = require("firebase/firestore");
 const authenticate = require("./middlewares/firebaseAuthMiddleware"); // Import authentication middleware
 
@@ -311,6 +313,109 @@ app.delete("/delete-post/:postId", authenticate, async (req, res) => {
     res.status(500).json({ error: "Error deleting post" });
   }
 });
+// Route to like or dislike a post
+app.post("/toggle-like/:postId", authenticate, async (req, res) => {
+  const { postId } = req.params;
+  const { uid } = req.user;
+
+  try {
+    const postDocRef = doc(postsCollection, postId);
+    const userDocRef = doc(usersCollection, uid);
+    const postDoc = await getDoc(postDocRef);
+
+    if (!postDoc.exists) {
+      return res.status(404).json({ error: "Post not found" });
+    }
+
+    const post = postDoc.data();
+    const userLiked = post.likes && post.likes.includes(uid);
+
+    const postUpdate = userLiked
+      ? { likes: arrayRemove(uid), likeCount: increment(-1) }
+      : { likes: arrayUnion(uid), likeCount: increment(1) };
+
+    const userUpdate = userLiked
+      ? { likedPosts: arrayRemove(postId) }
+      : { likedPosts: arrayUnion(postId) };
+
+    await updateDoc(postDocRef, postUpdate);
+    await updateDoc(userDocRef, userUpdate);
+
+    res.json({
+      message: `Post ${userLiked ? "disliked" : "liked"} successfully`,
+      postId,
+      userLiked,
+    });
+  } catch (error) {
+    console.error("Error toggling like:", error);
+    res.status(500).json({ error: "Error toggling like" });
+  }
+});
+
+// Route to get the names of users who liked a post
+app.get("/post-likes/:postId", async (req, res) => {
+  const { postId } = req.params;
+
+  try {
+    const postDocRef = doc(postsCollection, postId);
+    const postDoc = await getDoc(postDocRef);
+
+    if (!postDoc.exists) {
+      return res.status(404).json({ error: "Post not found" });
+    }
+
+    const post = postDoc.data();
+
+    if (!post.likes || post.likes.length === 0) {
+      return res.json({ likes: [] });
+    }
+
+    const userDocs = await getDocs(
+      query(usersCollection, where("uid", "in", post.likes))
+    );
+    const likes = userDocs.docs.map((doc) => doc.data().firstName);
+
+    res.json({ likes });
+  } catch (error) {
+    console.error("Error fetching likes:", error);
+    res.status(500).json({ error: "Error fetching likes" });
+  }
+});
+
+// Route to toggle bookmark a post
+app.post("/toggle-bookmark/:postId", authenticate, async (req, res) => {
+  const { postId } = req.params;
+  const { uid } = req.user;
+
+  try {
+    const userDocRef = doc(usersCollection, uid);
+    const userDoc = await getDoc(userDocRef);
+
+    if (!userDoc.exists) {
+      return res.status(404).json({ error: "User not found" });
+    }
+
+    const user = userDoc.data();
+    const isBookmarked = user.bookmarks && user.bookmarks.includes(postId);
+
+    const userUpdate = isBookmarked
+      ? { bookmarks: arrayRemove(postId) }
+      : { bookmarks: arrayUnion(postId) };
+
+    await updateDoc(userDocRef, userUpdate);
+
+    res.json({
+      message: `Post ${
+        isBookmarked ? "unbookmarked" : "bookmarked"
+      } successfully`,
+      postId,
+      isBookmarked,
+    });
+  } catch (error) {
+    console.error("Error toggling bookmark:", error);
+    res.status(500).json({ error: "Error toggling bookmark" });
+  }
+});
 // Route to add a comment to a post
 app.post("/add-comment", authenticate, async (req, res) => {
   const { postId, body } = req.body;
@@ -346,6 +451,7 @@ app.post("/add-comment", authenticate, async (req, res) => {
     res.status(500).json({ error: "Error adding comment" });
   }
 });
+
 app.get("/about", (req, res) => {
   res.json({
     Team: [
