@@ -452,6 +452,58 @@ app.post("/add-comment", authenticate, async (req, res) => {
   }
 });
 
+// Route to toggle follow/unfollow a user
+app.post("/toggle-follow/:userId", authenticate, async (req, res) => {
+  const { uid } = req.user;
+  const { userId } = req.params;
+
+  if (uid === userId) {
+    return res
+      .status(400)
+      .json({ error: "You cannot follow/unfollow yourself" });
+  }
+
+  try {
+    const userDoc = doc(usersCollection, uid);
+    const followedUserDoc = doc(usersCollection, userId);
+
+    const userSnapshot = await getDoc(userDoc);
+    const followedUserSnapshot = await getDoc(followedUserDoc);
+
+    if (!userSnapshot.exists || !followedUserSnapshot.exists) {
+      return res.status(404).json({ error: "User not found" });
+    }
+
+    const userData = userSnapshot.data();
+
+    const isFollowing =
+      userData.following && userData.following.includes(userId);
+
+    if (isFollowing) {
+      // Unfollow user
+      await updateDoc(userDoc, {
+        following: arrayRemove(userId),
+      });
+      await updateDoc(followedUserDoc, {
+        followers: arrayRemove(uid),
+      });
+      res.json({ message: "User unfollowed successfully", following: false });
+    } else {
+      // Follow user
+      await updateDoc(userDoc, {
+        following: arrayUnion(userId),
+      });
+      await updateDoc(followedUserDoc, {
+        followers: arrayUnion(uid),
+      });
+      res.json({ message: "User followed successfully", following: true });
+    }
+  } catch (error) {
+    console.error("Error toggling follow:", error);
+    res.status(500).json({ error: "Error toggling follow" });
+  }
+});
+
 app.get("/about", (req, res) => {
   res.json({
     Team: [
