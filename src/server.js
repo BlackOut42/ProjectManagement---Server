@@ -260,6 +260,15 @@ app.put("/edit-post/:postId", authenticate, async (req, res) => {
   }
 
   try {
+    const userDocRef = doc(usersCollection, uid);
+    const userDoc = await getDoc(userDocRef);
+
+    if (!userDoc.exists()) {
+      return res.status(404).json({ error: "User not found" });
+    }
+
+    const user = userDoc.data();
+
     const postDocRef = doc(postsCollection, postId);
     const postDoc = await getDoc(postDocRef);
 
@@ -269,7 +278,7 @@ app.put("/edit-post/:postId", authenticate, async (req, res) => {
 
     const post = postDoc.data();
 
-    if (post.uid !== uid && !req.user.isAdmin) {
+    if (post.uid !== uid && !user.isAdmin) {
       return res.status(403).json({
         error: "You can only edit your own posts or you need admin rights",
       });
@@ -360,24 +369,25 @@ app.delete("/delete-post/:postId", authenticate, async (req, res) => {
   const { uid } = req.user;
 
   try {
-    const postDocRef = doc(postsCollection, postId);
-    const postDoc = await getDoc(postDocRef);
-
-    if (!postDoc.exists) {
-      return res.status(404).json({ error: "Post not found" });
-    }
-
-    const post = postDoc.data();
     const userDocRef = doc(usersCollection, uid);
     const userDoc = await getDoc(userDocRef);
 
-    if (!userDoc.exists) {
+    if (!userDoc.exists()) {
       return res.status(404).json({ error: "User not found" });
     }
 
     const user = userDoc.data();
 
-    if (post.uid !== uid && !req.user.isAdmin && post.sharedByUid !== uid) {
+    const postDocRef = doc(postsCollection, postId);
+    const postDoc = await getDoc(postDocRef);
+
+    if (!postDoc.exists()) {
+      return res.status(404).json({ error: "Post not found" });
+    }
+
+    const post = postDoc.data();
+
+    if (post.uid !== uid && !user.isAdmin && post.sharedByUid !== uid) {
       return res.status(403).json({
         error: "You can only delete your own posts or you need admin rights.",
       });
@@ -407,7 +417,7 @@ app.delete("/delete-post/:postId", authenticate, async (req, res) => {
     }
 
     // Delete the post (either original or shared)
-    batch.delete(postDoc);
+    batch.delete(postDocRef);
 
     await batch.commit();
 
