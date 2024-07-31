@@ -25,6 +25,7 @@ const {
   arrayUnion,
   arrayRemove,
   increment,
+  writeBatch,
 } = require("firebase/firestore");
 const authenticate = require("./middlewares/firebaseAuthMiddleware"); // Import authentication middleware
 
@@ -181,7 +182,10 @@ app.post("/create-post", authenticate, async (req, res) => {
       author: authorObj.firstName,
       createdAt: Timestamp.fromDate(new Date()), // Use Firestore timestamp
       uid: uid,
+      likes: [],
       comments: [],
+      likeCount: 0,
+      sharedPosts: [],
     });
     res.json({ message: "Post created successfully" });
   } catch (error) {
@@ -225,12 +229,31 @@ app.get("/posts", async (req, res) => {
     res.status(500).json({ error: "Error fetching posts" });
   }
 });
+// Route to fetch an original post by ID
+app.get("/posts/:postId", async (req, res) => {
+  const { postId } = req.params;
+
+  try {
+    const postDoc = doc(db, "posts", postId);
+    const postSnapshot = await getDoc(postDoc);
+
+    if (!postSnapshot.exists()) {
+      return res.status(404).json({ error: "Post not found" });
+    }
+
+    const postData = postSnapshot.data();
+    res.json({ id: postSnapshot.id, ...postData });
+  } catch (error) {
+    console.error("Error fetching post:", error);
+    res.status(500).json({ error: "Error fetching post" });
+  }
+});
 
 // Route to edit a post
 app.put("/edit-post/:postId", authenticate, async (req, res) => {
+  const { uid } = req.user; // Get UID from the token
   const { postId } = req.params;
   const { title, body } = req.body;
-  const { uid } = req.user;
 
   if (!title || !body) {
     return res.status(400).json({ error: "Title and body are required" });
@@ -240,42 +263,97 @@ app.put("/edit-post/:postId", authenticate, async (req, res) => {
     const postDocRef = doc(postsCollection, postId);
     const postDoc = await getDoc(postDocRef);
 
-    if (!postDoc.exists) {
+    if (!postDoc.exists()) {
       return res.status(404).json({ error: "Post not found" });
     }
 
     const post = postDoc.data();
-    const userDocRef = doc(usersCollection, uid);
-    const userDoc = await getDoc(userDocRef);
 
-    if (!userDoc.exists) {
-      return res.status(404).json({ error: "User not found" });
-    }
-
-    const user = userDoc.data();
-
-    if (post.uid !== uid && !user.isAdmin) {
+    if (post.uid !== uid && !req.user.isAdmin) {
       return res.status(403).json({
         error: "You can only edit your own posts or you need admin rights",
       });
     }
 
-    await updateDoc(postDocRef, {
-      title,
-      body,
-    });
+    // Update the original post
+    await updateDoc(postDocRef, { title, body });
 
-    const updatedPost = (await getDoc(postDocRef)).data();
+    // If it's the original post, update all shared posts
+    if (!post.originalPostId) {
+      const batch = writeBatch(db);
+      if (post.sharedPosts && post.sharedPosts.length > 0) {
+        post.sharedPosts.forEach((sharedPostId) => {
+          const sharedPostDoc = doc(db, "posts", sharedPostId);
+          batch.update(sharedPostDoc, { title, body });
+        });
+      }
+      await batch.commit();
+    }
 
     res.json({
       message: "Post updated successfully",
-      updatedPost: { ...updatedPost, id: postDocRef.id },
+      updatedPost: { ...post, title, body },
     });
   } catch (error) {
-    console.error("Error updating post:", error);
-    res.status(500).json({ error: "Error updating post" });
+    console.error("Error editing post:", error);
+    res.status(500).json({ error: "Error editing post" });
   }
 });
+
+// Route to share a post
+app.post("/share-post/:postId", authenticate, async (req, res) => {
+  const { uid } = req.user; // Get UID from the token
+  const { postId } = req.params;
+  const user = JSON.parse(req.headers.user); // Get user data from the headers
+  console.log(postId);
+
+  try {
+    const postDoc = doc(db, "posts", postId);
+    const postSnapshot = await getDoc(postDoc);
+
+    if (!postSnapshot.exists()) {
+      return res.status(404).json({ error: "Post not found" });
+    }
+
+    const originalPostId = postSnapshot.data().originalPostId || postId;
+    const originalPostDoc = doc(db, "posts", originalPostId);
+    const originalPostSnapshot = await getDoc(originalPostDoc);
+
+    if (!originalPostSnapshot.exists()) {
+      return res.status(404).json({ error: "Original post not found" });
+    }
+
+    const originalPost = originalPostSnapshot.data();
+    const sharedPost = {
+      ...originalPost,
+      sharedBy: user.firstName,
+      sharedByUid: uid,
+      sharedAt: Timestamp.fromDate(new Date()),
+      originalPostId: originalPostId, // Ensure reference to the original post ID
+      comments: [], // Initialize an empty comments array for the shared post
+      likes: [], // Initialize an empty likes array for the shared post
+      likeCount: 0, // Initialize the like count to 0 for the shared post
+      sharedPosts: [], // Initialize the sharedPosts array to empty
+    };
+
+    const sharedPostDoc = doc(postsCollection, `${uid}_shared_${Date.now()}`);
+    await setDoc(sharedPostDoc, sharedPost);
+
+    // Add shared post ID to the original post's shared list
+    await updateDoc(originalPostDoc, {
+      sharedPosts: arrayUnion(sharedPostDoc.id),
+    });
+
+    res.json({
+      message: "Post shared successfully",
+      sharedPostId: sharedPostDoc.id,
+    });
+  } catch (error) {
+    console.error("Error sharing post:", error);
+    res.status(500).json({ error: "Error sharing post" });
+  }
+});
+
 // Route to delete a post
 app.delete("/delete-post/:postId", authenticate, async (req, res) => {
   const { postId } = req.params;
@@ -299,13 +377,39 @@ app.delete("/delete-post/:postId", authenticate, async (req, res) => {
 
     const user = userDoc.data();
 
-    if (post.uid !== uid && !user.isAdmin) {
+    if (post.uid !== uid && !req.user.isAdmin && post.sharedByUid !== uid) {
       return res.status(403).json({
-        error: "You can only delete your own posts or you need admin rights",
+        error: "You can only delete your own posts or you need admin rights.",
       });
     }
 
-    await deleteDoc(postDocRef);
+    const batch = writeBatch(db);
+
+    // Check if it's an original post with shared instances
+    if (post.sharedPosts && post.sharedPosts.length > 0) {
+      // Delete all shared posts if this is the original post
+      post.sharedPosts.forEach((sharedPostId) => {
+        const sharedPostDoc = doc(db, "posts", sharedPostId);
+        batch.delete(sharedPostDoc);
+      });
+    } else if (post.originalPostId) {
+      // If it's a shared post, remove it from the original post's shared list
+      const originalPostDoc = doc(db, "posts", post.originalPostId);
+      const originalPostSnapshot = await getDoc(originalPostDoc);
+
+      if (originalPostSnapshot.exists()) {
+        const originalPostData = originalPostSnapshot.data();
+        const updatedSharedPosts = originalPostData.sharedPosts.filter(
+          (id) => id !== postId
+        );
+        batch.update(originalPostDoc, { sharedPosts: updatedSharedPosts });
+      }
+    }
+
+    // Delete the post (either original or shared)
+    batch.delete(postDoc);
+
+    await batch.commit();
 
     res.json({ message: "Post deleted successfully" });
   } catch (error) {
@@ -313,6 +417,7 @@ app.delete("/delete-post/:postId", authenticate, async (req, res) => {
     res.status(500).json({ error: "Error deleting post" });
   }
 });
+
 // Route to like or dislike a post
 app.post("/toggle-like/:postId", authenticate, async (req, res) => {
   const { postId } = req.params;
@@ -360,25 +465,28 @@ app.get("/post-likes/:postId", async (req, res) => {
     const postDocRef = doc(postsCollection, postId);
     const postDoc = await getDoc(postDocRef);
 
-    if (!postDoc.exists) {
+    if (!postDoc.exists()) {
       return res.status(404).json({ error: "Post not found" });
     }
 
     const post = postDoc.data();
+    const likes = post.likes || []; // Ensure likes is an array
+    const likeNames = [];
 
-    if (!post.likes || post.likes.length === 0) {
-      return res.json({ likes: [] });
+    if (likes.length > 0) {
+      for (const uid of likes) {
+        const userDoc = doc(db, "users", uid);
+        const userSnapshot = await getDoc(userDoc);
+        if (userSnapshot.exists()) {
+          likeNames.push(userSnapshot.data().firstName);
+        }
+      }
     }
 
-    const userDocs = await getDocs(
-      query(usersCollection, where("uid", "in", post.likes))
-    );
-    const likes = userDocs.docs.map((doc) => doc.data().firstName);
-
-    res.json({ likes });
+    res.json({ likes: likeNames });
   } catch (error) {
-    console.error("Error fetching likes:", error);
-    res.status(500).json({ error: "Error fetching likes" });
+    console.error("Error fetching like names:", error);
+    res.status(500).json({ error: "Error fetching like names" });
   }
 });
 
