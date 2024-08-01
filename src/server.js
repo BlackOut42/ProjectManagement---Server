@@ -186,6 +186,7 @@ app.post("/create-post", authenticate, async (req, res) => {
       comments: [],
       likeCount: 0,
       sharedPosts: [],
+      reposts: [],
     });
     res.json({ message: "Post created successfully" });
   } catch (error) {
@@ -278,24 +279,26 @@ app.put("/edit-post/:postId", authenticate, async (req, res) => {
 
     const post = postDoc.data();
 
-    if (post.uid !== uid && !user.isAdmin) {
+    if (post.uid !== uid && !user.isAdmin && post.repostedByUid !== uid) {
       return res.status(403).json({
         error: "You can only edit your own posts or you need admin rights",
       });
     }
 
-    // Update the original post
+    // Update the post
     await updateDoc(postDocRef, { title, body });
 
     // If it's the original post, update all shared posts
     if (!post.originalPostId) {
       const batch = writeBatch(db);
+
       if (post.sharedPosts && post.sharedPosts.length > 0) {
         post.sharedPosts.forEach((sharedPostId) => {
           const sharedPostDoc = doc(db, "posts", sharedPostId);
           batch.update(sharedPostDoc, { title, body });
         });
       }
+
       await batch.commit();
     }
 
@@ -337,11 +340,13 @@ app.post("/share-post/:postId", authenticate, async (req, res) => {
       ...originalPost,
       sharedBy: user.firstName,
       sharedByUid: uid,
-      sharedAt: Timestamp.fromDate(new Date()),
+      createdAt: Timestamp.fromDate(new Date()), // Use current timestamp for createdAt
+      originalPostTimestamp: originalPost.createdAt, // Store the original post's creation timestamp
       originalPostId: originalPostId, // Ensure reference to the original post ID
       comments: [], // Initialize an empty comments array for the shared post
       likes: [], // Initialize an empty likes array for the shared post
       likeCount: 0, // Initialize the like count to 0 for the shared post
+      reposts: [], // Initialize the reposts array to empty
       sharedPosts: [], // Initialize the sharedPosts array to empty
     };
 
@@ -360,6 +365,58 @@ app.post("/share-post/:postId", authenticate, async (req, res) => {
   } catch (error) {
     console.error("Error sharing post:", error);
     res.status(500).json({ error: "Error sharing post" });
+  }
+});
+
+// Route to repost a post
+app.post("/repost/:postId", authenticate, async (req, res) => {
+  const { uid } = req.user; // Get UID from the token
+  const { postId } = req.params;
+  const { title, body } = req.body; // New title and body for the repost
+
+  if (!title || !body) {
+    return res.status(400).json({ error: "Title and body are required" });
+  }
+
+  try {
+    const postDoc = doc(db, "posts", postId);
+    const postSnapshot = await getDoc(postDoc);
+
+    if (!postSnapshot.exists()) {
+      return res.status(404).json({ error: "Post not found" });
+    }
+    const user = JSON.parse(req.headers.user);
+
+    const repost = {
+      author: postSnapshot.data().author,
+      title, // New title for the repost
+      body, // New body for the repost
+      repostedBy: user.firstName,
+      repostedByUid: user.uid,
+      createdAt: Timestamp.fromDate(new Date()),
+      originalPostId: postId,
+      comments: [], // Initialize an empty comments array for the repost
+      likes: [], // Initialize an empty likes array for the repost
+      likeCount: 0, // Initialize the like count to 0 for the repost
+      reposts: [], // Initialize the reposts array to empty
+      sharedPosts: [], // Initialize the sharedPosts array to empty
+    };
+
+    const repostDoc = doc(postsCollection, `${uid}_repost_${Date.now()}`);
+    await setDoc(repostDoc, repost);
+
+    // Add repost ID to the original post's reposts list
+    await updateDoc(postDoc, {
+      reposts: arrayUnion(repostDoc.id),
+    });
+
+    res.json({
+      message: "Post reposted successfully",
+      repostId: repostDoc.id,
+    });
+  } catch (error) {
+    console.error("Error reposting post:", error);
+    res.status(500).json({ error: "Error reposting post" });
   }
 });
 
@@ -387,7 +444,12 @@ app.delete("/delete-post/:postId", authenticate, async (req, res) => {
 
     const post = postDoc.data();
 
-    if (post.uid !== uid && !user.isAdmin && post.sharedByUid !== uid) {
+    if (
+      post.uid !== uid &&
+      !user.isAdmin &&
+      post.sharedByUid !== uid &&
+      post.repostedByUid !== uid
+    ) {
       return res.status(403).json({
         error: "You can only delete your own posts or you need admin rights.",
       });
@@ -402,8 +464,19 @@ app.delete("/delete-post/:postId", authenticate, async (req, res) => {
         const sharedPostDoc = doc(db, "posts", sharedPostId);
         batch.delete(sharedPostDoc);
       });
-    } else if (post.originalPostId) {
-      // If it's a shared post, remove it from the original post's shared list
+    }
+
+    // Check if it's an original post with repost instances
+    if (post.reposts && post.reposts.length > 0) {
+      // Delete all reposts if this is the original post
+      post.reposts.forEach((repostId) => {
+        const repostDoc = doc(db, "posts", repostId);
+        batch.delete(repostDoc);
+      });
+    }
+
+    // Handle shared posts
+    if (post.originalPostId && post.sharedByUid) {
       const originalPostDoc = doc(db, "posts", post.originalPostId);
       const originalPostSnapshot = await getDoc(originalPostDoc);
 
@@ -416,7 +489,21 @@ app.delete("/delete-post/:postId", authenticate, async (req, res) => {
       }
     }
 
-    // Delete the post (either original or shared)
+    // Handle reposts
+    if (post.originalPostId && post.repostedByUid) {
+      const originalPostDoc = doc(db, "posts", post.originalPostId);
+      const originalPostSnapshot = await getDoc(originalPostDoc);
+
+      if (originalPostSnapshot.exists()) {
+        const originalPostData = originalPostSnapshot.data();
+        const updatedReposts = originalPostData.reposts.filter(
+          (id) => id !== postId
+        );
+        batch.update(originalPostDoc, { reposts: updatedReposts });
+      }
+    }
+
+    // Delete the post (either original, shared, or repost)
     batch.delete(postDocRef);
 
     await batch.commit();
@@ -509,7 +596,7 @@ app.post("/toggle-bookmark/:postId", authenticate, async (req, res) => {
     const userDocRef = doc(usersCollection, uid);
     const userDoc = await getDoc(userDocRef);
 
-    if (!userDoc.exists) {
+    if (!userDoc.exists()) {
       return res.status(404).json({ error: "User not found" });
     }
 
@@ -534,6 +621,7 @@ app.post("/toggle-bookmark/:postId", authenticate, async (req, res) => {
     res.status(500).json({ error: "Error toggling bookmark" });
   }
 });
+
 // Route to add a comment to a post
 app.post("/add-comment", authenticate, async (req, res) => {
   const { postId, body } = req.body;
@@ -605,7 +693,13 @@ app.post("/toggle-follow/:userId", authenticate, async (req, res) => {
       await updateDoc(followedUserDoc, {
         followers: arrayRemove(uid),
       });
-      res.json({ message: "User unfollowed successfully", following: false });
+      const updatedUserDoc = await getDoc(userDoc);
+      const updatedUserData = updatedUserDoc.data();
+      res.json({
+        message: "User unfollowed successfully",
+        following: false,
+        user: updatedUserData,
+      });
     } else {
       // Follow user
       await updateDoc(userDoc, {
@@ -614,11 +708,39 @@ app.post("/toggle-follow/:userId", authenticate, async (req, res) => {
       await updateDoc(followedUserDoc, {
         followers: arrayUnion(uid),
       });
-      res.json({ message: "User followed successfully", following: true });
+      res.json({
+        message: "User followed successfully",
+        following: true,
+      });
     }
   } catch (error) {
     console.error("Error toggling follow:", error);
     res.status(500).json({ error: "Error toggling follow" });
+  }
+});
+
+// Route to get user data by UID
+app.get("/user/:uid", authenticate, async (req, res) => {
+  const { uid } = req.params;
+  const { uid: authenticatedUid } = req.user;
+
+  if (uid !== authenticatedUid) {
+    return res.status(403).json({ error: "You can only access your own data" });
+  }
+
+  try {
+    const userDoc = doc(usersCollection, uid);
+    const userSnapshot = await getDoc(userDoc);
+
+    if (!userSnapshot.exists()) {
+      return res.status(404).json({ error: "User not found" });
+    }
+
+    const userData = userSnapshot.data();
+    res.json(userData);
+  } catch (error) {
+    console.error("Error fetching user data:", error);
+    res.status(500).json({ error: "Error fetching user data" });
   }
 });
 
