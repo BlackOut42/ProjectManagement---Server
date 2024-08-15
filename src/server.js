@@ -27,6 +27,7 @@ const {
   increment,
   writeBatch,
 } = require("firebase/firestore");
+const admin = require("firebase-admin");
 const authenticate = require("./middlewares/firebaseAuthMiddleware"); // Import authentication middleware
 
 const usersCollection = collection(db, "users");
@@ -170,12 +171,17 @@ app.post("/create-post", authenticate, async (req, res) => {
   const { title, body, author } = req.body;
   console.log(author);
   const authorObj = JSON.parse(author);
+
   if (!title || !body) {
     return res.status(400).json({ error: "Title and body are required" });
   }
 
   try {
-    const postDoc = doc(postsCollection, `${uid}_${Date.now()}`); // Use UID and timestamp to create a unique document
+    // Generate a unique post ID
+    const postID = `${uid}_${Date.now()}`;
+    const postDoc = doc(postsCollection, postID);
+
+    // Create the post document
     await setDoc(postDoc, {
       title: title,
       body: body,
@@ -188,6 +194,30 @@ app.post("/create-post", authenticate, async (req, res) => {
       sharedPosts: [],
       reposts: [],
     });
+
+    // Reference to the user document
+    const userDoc = doc(usersCollection, uid);
+    const userSnap = await getDoc(userDoc);
+
+    if (userSnap.exists()) {
+      // Check if the posts array exists
+      const userData = userSnap.data();
+      if (userData.posts && Array.isArray(userData.posts)) {
+        // If posts array exists, update it
+        await updateDoc(userDoc, {
+          posts: arrayUnion(postID),
+        });
+      } else {
+        // If posts array doesn't exist, create it with the new post ID
+        await updateDoc(userDoc, {
+          posts: [postID],
+        });
+      }
+    } else {
+      // If the user document doesn't exist, handle this case appropriately
+      return res.status(404).json({ error: "User not found" });
+    }
+
     res.json({ message: "Post created successfully" });
   } catch (error) {
     console.error("Error creating post:", error);
@@ -358,6 +388,25 @@ app.post("/share-post/:postId", authenticate, async (req, res) => {
       sharedPosts: arrayUnion(sharedPostDoc.id),
     });
 
+    // Reference to the user document
+    const userDoc = doc(usersCollection, uid);
+    const userSnap = await getDoc(userDoc);
+
+    if (userSnap.exists()) {
+      const userData = userSnap.data();
+      if (userData.posts && Array.isArray(userData.posts)) {
+        await updateDoc(userDoc, {
+          posts: arrayUnion(sharedPostDoc.id),
+        });
+      } else {
+        await updateDoc(userDoc, {
+          posts: [sharedPostDoc.id],
+        });
+      }
+    } else {
+      return res.status(404).json({ error: "User not found" });
+    }
+
     res.json({
       message: "Post shared successfully",
       sharedPostId: sharedPostDoc.id,
@@ -410,6 +459,25 @@ app.post("/repost/:postId", authenticate, async (req, res) => {
       reposts: arrayUnion(repostDoc.id),
     });
 
+    // Reference to the user document
+    const userDoc = doc(usersCollection, uid);
+    const userSnap = await getDoc(userDoc);
+
+    if (userSnap.exists()) {
+      const userData = userSnap.data();
+      if (userData.posts && Array.isArray(userData.posts)) {
+        await updateDoc(userDoc, {
+          posts: arrayUnion(repostDoc.id),
+        });
+      } else {
+        await updateDoc(userDoc, {
+          posts: [repostDoc.id],
+        });
+      }
+    } else {
+      return res.status(404).json({ error: "User not found" });
+    }
+
     res.json({
       message: "Post reposted successfully",
       repostId: repostDoc.id,
@@ -419,99 +487,104 @@ app.post("/repost/:postId", authenticate, async (req, res) => {
     res.status(500).json({ error: "Error reposting post" });
   }
 });
+const deletePost = async (
+  postId,
+  uid,
+  db,
+  postsCollection,
+  usersCollection
+) => {
+  const userDocRef = doc(usersCollection, uid);
+  const userDoc = await getDoc(userDocRef);
 
-// Route to delete a post
+  if (!userDoc.exists()) {
+    throw new Error("User not found");
+  }
+
+  const user = userDoc.data();
+
+  const postDocRef = doc(postsCollection, postId);
+  const postDoc = await getDoc(postDocRef);
+
+  if (!postDoc.exists()) {
+    console.log("Post not found or already deleted:", postId);
+    return;
+  }
+
+  const post = postDoc.data();
+
+  if (
+    post.uid !== uid &&
+    !user.isAdmin &&
+    post.sharedByUid !== uid &&
+    post.repostedByUid !== uid
+  ) {
+    throw new Error(
+      "You can only delete your own posts or you need admin rights."
+    );
+  }
+
+  const batch = writeBatch(db);
+
+  // Handle original posts with shared instances
+  if (post.sharedPosts && post.sharedPosts.length > 0) {
+    post.sharedPosts.forEach((sharedPostId) => {
+      const sharedPostDoc = doc(db, "posts", sharedPostId);
+      batch.delete(sharedPostDoc);
+    });
+  }
+
+  // Handle original posts with repost instances
+  if (post.reposts && post.reposts.length > 0) {
+    post.reposts.forEach((repostId) => {
+      const repostDoc = doc(db, "posts", repostId);
+      batch.delete(repostDoc);
+    });
+  }
+
+  // Handle shared posts
+  if (post.originalPostId && post.sharedByUid) {
+    const originalPostDoc = doc(db, "posts", post.originalPostId);
+    const originalPostSnapshot = await getDoc(originalPostDoc);
+
+    if (originalPostSnapshot.exists()) {
+      const originalPostData = originalPostSnapshot.data();
+      const updatedSharedPosts = originalPostData.sharedPosts.filter(
+        (id) => id !== postId
+      );
+      batch.update(originalPostDoc, { sharedPosts: updatedSharedPosts });
+    }
+  }
+
+  // Handle reposts
+  if (post.originalPostId && post.repostedByUid) {
+    const originalPostDoc = doc(db, "posts", post.originalPostId);
+    const originalPostSnapshot = await getDoc(originalPostDoc);
+
+    if (originalPostSnapshot.exists()) {
+      const originalPostData = originalPostSnapshot.data();
+      const updatedReposts = originalPostData.reposts.filter(
+        (id) => id !== postId
+      );
+      batch.update(originalPostDoc, { reposts: updatedReposts });
+    }
+  }
+
+  // Finally, delete the post itself
+  batch.delete(postDocRef);
+
+  await batch.commit();
+};
 app.delete("/delete-post/:postId", authenticate, async (req, res) => {
   const { postId } = req.params;
   const { uid } = req.user;
 
   try {
-    const userDocRef = doc(usersCollection, uid);
-    const userDoc = await getDoc(userDocRef);
-
-    if (!userDoc.exists()) {
-      return res.status(404).json({ error: "User not found" });
-    }
-
-    const user = userDoc.data();
-
-    const postDocRef = doc(postsCollection, postId);
-    const postDoc = await getDoc(postDocRef);
-
-    if (!postDoc.exists()) {
-      return res.status(404).json({ error: "Post not found" });
-    }
-
-    const post = postDoc.data();
-
-    if (
-      post.uid !== uid &&
-      !user.isAdmin &&
-      post.sharedByUid !== uid &&
-      post.repostedByUid !== uid
-    ) {
-      return res.status(403).json({
-        error: "You can only delete your own posts or you need admin rights.",
-      });
-    }
-
-    const batch = writeBatch(db);
-
-    // Check if it's an original post with shared instances
-    if (post.sharedPosts && post.sharedPosts.length > 0) {
-      // Delete all shared posts if this is the original post
-      post.sharedPosts.forEach((sharedPostId) => {
-        const sharedPostDoc = doc(db, "posts", sharedPostId);
-        batch.delete(sharedPostDoc);
-      });
-    }
-
-    // Check if it's an original post with repost instances
-    if (post.reposts && post.reposts.length > 0) {
-      // Delete all reposts if this is the original post
-      post.reposts.forEach((repostId) => {
-        const repostDoc = doc(db, "posts", repostId);
-        batch.delete(repostDoc);
-      });
-    }
-
-    // Handle shared posts
-    if (post.originalPostId && post.sharedByUid) {
-      const originalPostDoc = doc(db, "posts", post.originalPostId);
-      const originalPostSnapshot = await getDoc(originalPostDoc);
-
-      if (originalPostSnapshot.exists()) {
-        const originalPostData = originalPostSnapshot.data();
-        const updatedSharedPosts = originalPostData.sharedPosts.filter(
-          (id) => id !== postId
-        );
-        batch.update(originalPostDoc, { sharedPosts: updatedSharedPosts });
-      }
-    }
-
-    // Handle reposts
-    if (post.originalPostId && post.repostedByUid) {
-      const originalPostDoc = doc(db, "posts", post.originalPostId);
-      const originalPostSnapshot = await getDoc(originalPostDoc);
-
-      if (originalPostSnapshot.exists()) {
-        const originalPostData = originalPostSnapshot.data();
-        const updatedReposts = originalPostData.reposts.filter(
-          (id) => id !== postId
-        );
-        batch.update(originalPostDoc, { reposts: updatedReposts });
-      }
-    }
-
-    // Delete the post (either original, shared, or repost)
-    batch.delete(postDocRef);
-
-    await batch.commit();
-
+    await deletePost(postId, uid, db, postsCollection, usersCollection);
     res.json({ message: "Post deleted successfully" });
   } catch (error) {
     console.error("Error deleting post:", error);
-    res.status(500).json({ error: "Error deleting post" });
+    res.status(500).json({ error: error.message });
   }
 });
 
@@ -724,10 +797,6 @@ app.get("/user/:uid", authenticate, async (req, res) => {
   const { uid } = req.params;
   const { uid: authenticatedUid } = req.user;
 
-  if (uid !== authenticatedUid) {
-    return res.status(403).json({ error: "You can only access your own data" });
-  }
-
   try {
     const userDoc = doc(usersCollection, uid);
     const userSnapshot = await getDoc(userDoc);
@@ -737,10 +806,313 @@ app.get("/user/:uid", authenticate, async (req, res) => {
     }
 
     const userData = userSnapshot.data();
-    res.json(userData);
+
+    if (uid === authenticatedUid) {
+      // If the authenticated user is requesting their own data, return all data
+      res.json(userData);
+    } else {
+      // If the authenticated user is requesting another user's data, return only public data
+      const publicData = {
+        firstName: userData.firstName,
+        email: userData.email,
+        followersCount: userData.followers ? userData.followers.length : 0,
+        followingCount: userData.following ? userData.following.length : 0,
+        posts: userData.posts || [],
+        uid: userData.uid,
+      };
+      res.json(publicData);
+    }
   } catch (error) {
     console.error("Error fetching user data:", error);
     res.status(500).json({ error: "Error fetching user data" });
+  }
+});
+
+// Route to get liked posts of a user
+app.get("/liked-posts/:userId", authenticate, async (req, res) => {
+  const { userId } = req.params;
+
+  try {
+    // Reference to the user document
+    const userDoc = doc(usersCollection, userId);
+    const userSnap = await getDoc(userDoc);
+
+    if (!userSnap.exists()) {
+      return res.status(404).json({ error: "User not found" });
+    }
+
+    const userData = userSnap.data();
+    const likedPosts = userData.likedPosts || [];
+
+    // Array to store the posts that exist
+    const validPosts = [];
+    // Array to store the IDs of posts that have been deleted
+    const invalidPostIds = [];
+
+    // Fetch posts from the likedPosts array
+    for (const postId of likedPosts) {
+      const postDoc = doc(postsCollection, postId);
+      const postSnap = await getDoc(postDoc);
+
+      if (postSnap.exists()) {
+        validPosts.push({ id: postId, ...postSnap.data() });
+      } else {
+        invalidPostIds.push(postId);
+      }
+    }
+
+    // If there are invalid post IDs, update the user's likedPosts array
+    if (invalidPostIds.length > 0) {
+      const updatedLikedPosts = likedPosts.filter(
+        (postId) => !invalidPostIds.includes(postId)
+      );
+
+      await updateDoc(userDoc, {
+        likedPosts: updatedLikedPosts,
+      });
+
+      console.log(`Updated likedPosts array for user ${userId}`);
+    }
+
+    res.json({
+      message: "Liked posts retrieved successfully",
+      posts: validPosts,
+    });
+  } catch (error) {
+    console.error("Error retrieving liked posts:", error);
+    res.status(500).json({ error: "Error retrieving liked posts" });
+  }
+});
+// Route to get bookmarked posts of a user
+app.get("/bookmarked-posts/:userId", authenticate, async (req, res) => {
+  const { userId } = req.params;
+
+  try {
+    // Reference to the user document
+    const userDoc = doc(usersCollection, userId);
+    const userSnap = await getDoc(userDoc);
+
+    if (!userSnap.exists()) {
+      return res.status(404).json({ error: "User not found" });
+    }
+
+    const userData = userSnap.data();
+    const bookmarks = userData.bookmarks || [];
+
+    // Array to store the posts that exist
+    const validPosts = [];
+    // Array to store the IDs of posts that have been deleted
+    const invalidPostIds = [];
+
+    // Fetch posts from the bookmarks array
+    for (const postId of bookmarks) {
+      const postDoc = doc(postsCollection, postId);
+      const postSnap = await getDoc(postDoc);
+
+      if (postSnap.exists()) {
+        validPosts.push({ id: postId, ...postSnap.data() });
+      } else {
+        invalidPostIds.push(postId);
+      }
+    }
+
+    // If there are invalid post IDs, update the user's bookmarks array
+    if (invalidPostIds.length > 0) {
+      const updatedBookmarks = bookmarks.filter(
+        (postId) => !invalidPostIds.includes(postId)
+      );
+
+      await updateDoc(userDoc, {
+        bookmarks: updatedBookmarks,
+      });
+
+      console.log(`Updated bookmarks array for user ${userId}`);
+    }
+
+    res.json({
+      message: "Bookmarked posts retrieved successfully",
+      posts: validPosts,
+    });
+  } catch (error) {
+    console.error("Error retrieving bookmarked posts:", error);
+    res.status(500).json({ error: "Error retrieving bookmarked posts" });
+  }
+});
+// Route to get user's own posts
+app.get("/user-posts/:userId", authenticate, async (req, res) => {
+  const { userId } = req.params;
+
+  try {
+    // Reference to the user document
+    const userDoc = doc(usersCollection, userId);
+    const userSnap = await getDoc(userDoc);
+
+    if (!userSnap.exists()) {
+      return res.status(404).json({ error: "User not found" });
+    }
+
+    const userData = userSnap.data();
+    const userPosts = userData.posts || [];
+
+    // Array to store the posts that exist
+    const validPosts = [];
+    // Array to store the IDs of posts that have been deleted
+    const invalidPostIds = [];
+
+    // Fetch posts from the user's posts array
+    for (const postId of userPosts) {
+      const postDoc = doc(postsCollection, postId);
+      const postSnap = await getDoc(postDoc);
+
+      if (postSnap.exists()) {
+        validPosts.push({ id: postId, ...postSnap.data() });
+      } else {
+        invalidPostIds.push(postId);
+      }
+    }
+
+    // If there are invalid post IDs, update the user's posts array
+    if (invalidPostIds.length > 0) {
+      const updatedUserPosts = userPosts.filter(
+        (postId) => !invalidPostIds.includes(postId)
+      );
+
+      await updateDoc(userDoc, {
+        posts: updatedUserPosts,
+      });
+
+      console.log(`Updated posts array for user ${userId}`);
+    }
+
+    res.json({
+      message: "User's posts retrieved successfully",
+      posts: validPosts,
+    });
+  } catch (error) {
+    console.error("Error retrieving user's posts:", error);
+    res.status(500).json({ error: "Error retrieving user's posts" });
+  }
+});
+// Route to get user statistics
+app.get("/user-statistics/:userId", authenticate, async (req, res) => {
+  const { userId } = req.params;
+
+  try {
+    // Reference to the user document
+    const userDoc = doc(usersCollection, userId);
+    const userSnap = await getDoc(userDoc);
+
+    if (!userSnap.exists()) {
+      return res.status(404).json({ error: "User not found" });
+    }
+
+    const userData = userSnap.data();
+
+    // Calculate the statistics
+    const followingCount = userData.following ? userData.following.length : 0;
+    const followersCount = userData.followers ? userData.followers.length : 0;
+    const bookmarkedCount = userData.bookmarks ? userData.bookmarks.length : 0;
+    const likedPostsCount = userData.likedPosts
+      ? userData.likedPosts.length
+      : 0;
+    const postsCount = userData.posts ? userData.posts.length : 0;
+
+    // Return the statistics
+    res.json({
+      followingCount,
+      followersCount,
+      likedPostsCount,
+      postsCount,
+      bookmarkedCount,
+    });
+  } catch (error) {
+    console.error("Error retrieving user statistics:", error);
+    res.status(500).json({ error: "Error retrieving user statistics" });
+  }
+});
+
+app.post("/change-password", authenticate, async (req, res) => {
+  const { newPassword } = req.body;
+  const { uid } = req.user;
+
+  if (!newPassword) {
+    return res.status(400).json({ message: "New password is required." });
+  }
+
+  // Validate the new password using the passwordValidationHandler
+  const passwordValid =
+    passwordValidationHandler.passwordValidation(newPassword);
+  if (!passwordValid) {
+    return res.status(400).json({
+      message:
+        "The password must be at least 8 characters long, contain at least one uppercase letter, and include at least one symbol.",
+    });
+  }
+
+  try {
+    // Update the user's password using Firebase Admin SDK
+    await admin.auth().updateUser(uid, { password: newPassword });
+    res.json({ message: "Password changed successfully." });
+  } catch (error) {
+    console.error("Error changing password:", error);
+    res
+      .status(500)
+      .json({ message: "Error changing password.", error: error.message });
+  }
+});
+
+app.delete("/delete-account", authenticate, async (req, res) => {
+  const { uid } = req.user;
+
+  try {
+    const userDocRef = doc(usersCollection, uid);
+    const userDoc = await getDoc(userDocRef);
+
+    if (!userDoc.exists()) {
+      return res.status(404).json({ error: "User not found" });
+    }
+
+    const user = userDoc.data();
+    const userPosts = user.posts || [];
+
+    // Delete all user's posts
+    for (const postId of userPosts) {
+      await deletePost(postId, uid, db, postsCollection, usersCollection);
+    }
+
+    // Delete the user document from Firestore
+    await deleteDoc(userDocRef);
+
+    // Delete the user's authentication record from Firebase Authentication
+    await admin.auth().deleteUser(uid);
+
+    res.json({ message: "User and all their posts deleted successfully." });
+  } catch (error) {
+    console.error("Error deleting user and posts:", error);
+    res.status(500).json({ error: "Error deleting user and posts." });
+  }
+});
+
+app.put("/update-name", authenticate, async (req, res) => {
+  const { firstName } = req.body;
+  const { uid } = req.user;
+
+  if (!firstName || typeof firstName !== "string") {
+    return res.status(400).json({ message: "Invalid first name provided." });
+  }
+
+  try {
+    const userDocRef = doc(usersCollection, uid);
+
+    // Update the first name in the user's document
+    await updateDoc(userDocRef, { firstName });
+
+    res.json({ message: "Name updated successfully." });
+  } catch (error) {
+    console.error("Error updating name:", error);
+    res
+      .status(500)
+      .json({ message: "Error updating name.", error: error.message });
   }
 });
 
